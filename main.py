@@ -119,16 +119,17 @@ def show_thread(thread_id: str) -> str:
     return '\n'.join(result)
 
 @mcp.tool()
-def find_threads(notmuch_filter: str) -> list[str]:
+def find_threads(notmuch_filter: str) -> list[tuple[str, str]]:
     """
-    Finds threads using a notmuch filter string and returns their thread IDs.
+    Finds threads using a notmuch filter string and returns a list containing the pair
+    (thread id, thread subject) corresponding to each thread matching the filter.
 
     Args:
         notmuch_filter: The notmuch query to execute. 
                        Example: "from:jane@example.com AND tag:unread"
 
     Returns:
-        list[str]: A list of thread IDs matching the search criteria
+        list[(str, str)]: A list of thread IDs and subjects for each thread matching the search criteria
     """
     thread_ids = []
     
@@ -140,7 +141,7 @@ def find_threads(notmuch_filter: str) -> list[str]:
             
             # Extract thread IDs
             for thread in threads:
-                thread_ids.append(thread.threadid)
+                thread_ids.append((thread.threadid, thread.subject))
                 
     except Exception as e:
         print(f"Error: {e}")
