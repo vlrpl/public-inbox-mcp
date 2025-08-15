@@ -1,0 +1,12 @@
+[project]
+name = "notmuch-mcp"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fastmcp>=2.10.2",
+    "mcp>=1.10.1",
+    "notmuch2>=0.1",
+    "typing>=3.10.0.0",
+]
