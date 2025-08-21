@@ -28,10 +28,10 @@ def retrieve_thread(thread_id: str) -> list[notmuch2.Message]:
         with notmuch2.Database(mode=notmuch2.Database.MODE.READ_ONLY) as db:
             # Search for the specific thread
             threads = db.threads(f"thread:{thread_id}")
-            
+
             # Get the first (and should be only) thread
             thread = next(iter(threads), None)
-            
+
             if thread:
                 # Get all messages in the thread
                 for message in thread.toplevel():
@@ -39,11 +39,11 @@ def retrieve_thread(thread_id: str) -> list[notmuch2.Message]:
                     walk_replies(messages, message)
             else:
                 print(f"Thread with ID {thread_id} not found")
-                
+
     except Exception as e:
         print(f"Error: {e}")
         return []
-    
+
     return messages
 
 def get_email_body(msg) -> str:
@@ -89,6 +89,7 @@ def get_message_info(message: notmuch2.Message) -> str:
     result.append(f"To: {message.header('to')}")
     result.append(f"Subject: {email_msg.get('Subject')}")
     result.append(f"Date: {message.header('date')}")
+    result.append(f"Message-id: {message.messageid}")
     result.append(f"Tags: {', '.join(message.tags)}")
     
     body = get_email_body(email_msg)
