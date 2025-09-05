@@ -119,36 +119,79 @@ def show_thread(thread_id: str) -> str:
 
     return '\n'.join(result)
 
+def do_find_threads(notmuch_filter: str) -> list[tuple[str, str]]:
+    """
+    Find patch series threads from a notmuch filter.
+
+    Args:
+        notmuch_filter: The notmuch query string to filter messages
+
+    Returns:
+        list[tuple[str, str]]: List of (thread_id, thread_subject) tuples for patch series
+
+    Raises:
+        ValueError: If notmuch_filter is empty or None
+        RuntimeError: If database access fails
+    """
+    if not notmuch_filter or not notmuch_filter.strip():
+        raise ValueError("notmuch_filter cannot be empty or None")
+
+    series_threads = []
+    seen_threads = set()
+
+    try:
+        with notmuch2.Database(mode=notmuch2.Database.MODE.READ_ONLY) as db:
+            messages = db.messages(notmuch_filter)
+
+            for message in messages:
+                thread_id = message.threadid
+
+                # Skip if we've already processed this thread
+                if thread_id in seen_threads:
+                    continue
+
+                subject = message.header('subject') or ""
+
+                # Check if this is a patch email (not a reply)
+                is_patch = "PATCH" in subject.upper()
+                is_reply = any(subject.upper().startswith(prefix) for prefix in ["RE:", "R:"])
+
+                if is_patch and not is_reply:
+                    # Get thread subject directly from the thread
+                    thread_query = db.threads(f"thread:{thread_id}")
+                    try:
+                        thread = next(iter(thread_query))
+                        series_threads.append((thread_id, thread.subject or subject))
+                        seen_threads.add(thread_id)
+                    except StopIteration:
+                        # Thread not found, use message subject as fallback
+                        series_threads.append((thread_id, subject))
+                        seen_threads.add(thread_id)
+
+    except notmuch2.NotmuchError as e:
+        raise RuntimeError(f"Notmuch database error: {e}")
+    except Exception as e:
+        raise RuntimeError(f"Unexpected error while searching threads: {e}")
+
+    # print(series_threads)
+    return series_threads
+
 @mcp.tool()
 def find_threads(notmuch_filter: str) -> list[tuple[str, str]]:
     """
-    Finds threads using a notmuch filter string and returns a list containing the pair
+    Finds series using a notmuch filter string and returns a list containing the pair
     (thread id, thread subject) corresponding to each thread matching the filter.
+    notmuch_filter must match only toplevel messages or messages whose subject
+    contains "PATCH" and are no "Re:" "RE:" "R:"
 
     Args:
-        notmuch_filter: The notmuch query to execute. 
+        notmuch_filter: The notmuch query to execute.
                        Example: "from:jane@example.com AND tag:unread"
 
     Returns:
         list[(str, str)]: A list of thread IDs and subjects for each thread matching the search criteria
     """
-    thread_ids = []
-    
-    try:
-        # Open the notmuch database
-        with notmuch2.Database(mode=notmuch2.Database.MODE.READ_ONLY) as db:
-            # Perform the search query
-            threads = db.threads(notmuch_filter)
-            
-            # Extract thread IDs
-            for thread in threads:
-                thread_ids.append((thread.threadid, thread.subject))
-                
-    except Exception as e:
-        print(f"Error: {e}")
-        return []
-    
-    return thread_ids
+    return do_find_threads(notmuch_filter)
 
 if __name__ == "__main__":
     import sys
