@@ -14,15 +14,15 @@ def walk_replies(messages, message):
 def retrieve_thread(thread_id: str) -> list[notmuch2.Message]:
     """
     Retrieve all messages in a thread given its thread ID.
-    
+
     Args:
         thread_id (str): The thread ID to retrieve messages from
-    
+
     Returns:
         list[notmuch2.Message]: A list of Message objects in the thread
     """
     messages = []
-    
+
     try:
         # Open the notmuch database
         with notmuch2.Database(mode=notmuch2.Database.MODE.READ_ONLY) as db:
@@ -72,31 +72,31 @@ def get_email_body(msg) -> str:
 def get_message_info(message: notmuch2.Message) -> str:
     """
     Helper function to format basic information about a message as a string.
-    
+
     Args:
         message (notmuch2.Message): The message object to format info for
-    
+
     Returns:
         str: Formatted string containing message information
     """
     result = []
     result.append(f"Message ID: {message.messageid}")
-    
+
     with message.path.open() as f:
         email_msg = message_from_file(f)
-    
+
     result.append(f"From: {email_msg.get('From')}")
     result.append(f"To: {message.header('to')}")
     result.append(f"Subject: {email_msg.get('Subject')}")
     result.append(f"Date: {message.header('date')}")
     result.append(f"Message-id: {message.messageid}")
     result.append(f"Tags: {', '.join(message.tags)}")
-    
+
     body = get_email_body(email_msg)
     result.append("Body:")
     result.append(body)
     result.append("-" * 50)
-    
+
     return '\n'.join(result)
 
 @mcp.tool()
@@ -151,10 +151,18 @@ def find_threads(notmuch_filter: str) -> list[tuple[str, str]]:
     return thread_ids
 
 if __name__ == "__main__":
+    import sys
+
     # To run this server:
     # 1. Make sure you have notmuch installed and configured.
     # 2. Install the required Python libraries:
     #    pip install fastmcp python-notmuch2
     # 3. Run the server from your terminal:
     #    fastmcp run main.py
-    mcp.run(transport="http", host="0.0.0.0", port=8000, path="/")
+
+    if len(sys.argv) == 2 and sys.argv[1] == "stdio":
+        mcp.run()
+    if len(sys.argv) == 2:
+        do_find_threads(sys.argv[1])
+    else:
+        mcp.run(transport="http", host="0.0.0.0", port=8000, path="/")
