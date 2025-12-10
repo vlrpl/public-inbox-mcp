@@ -85,17 +85,26 @@ def get_message_info(message: notmuch2.Message) -> str:
     with message.path.open() as f:
         email_msg = message_from_file(f)
 
+    result.append(f"In-Reply-To: {email_msg.get('In-Reply-To')}")
     result.append(f"From: {email_msg.get('From')}")
     result.append(f"To: {message.header('to')}")
     result.append(f"Subject: {email_msg.get('Subject')}")
     result.append(f"Date: {message.header('date')}")
-    result.append(f"Message-id: {message.messageid}")
     result.append(f"Tags: {', '.join(message.tags)}")
 
     body = get_email_body(email_msg)
     result.append("Body:")
     result.append(body)
     result.append("-" * 50)
+
+    return '\n'.join(result)
+
+def do_show_thread(tid: str) -> str:
+    result = []
+
+    messages = retrieve_thread(tid)
+    for msg in messages:
+        result.append(get_message_info(msg))
 
     return '\n'.join(result)
 
@@ -111,13 +120,7 @@ def show_thread(thread_id: str) -> str:
         A formatted string containing the messages in the thread,
         or an error message.
     """
-    result = []
-
-    messages = retrieve_thread(thread_id)
-    for msg in messages:
-        result.append(get_message_info(msg))
-
-    return '\n'.join(result)
+    return do_show_thread(thread_id)
 
 def do_find_threads(notmuch_filter: str) -> list[tuple[str, str]]:
     """
@@ -173,7 +176,6 @@ def do_find_threads(notmuch_filter: str) -> list[tuple[str, str]]:
     except Exception as e:
         raise RuntimeError(f"Unexpected error while searching threads: {e}")
 
-    # print(series_threads)
     return series_threads
 
 @mcp.tool()
@@ -221,6 +223,7 @@ if __name__ == "__main__":
     if len(sys.argv) == 2 and sys.argv[1] == "stdio":
         mcp.run()
     if len(sys.argv) == 2:
-        do_find_threads(sys.argv[1])
+        threads = do_find_threads(sys.argv[1])
+        do_show_thread(threads[0][0])
     else:
         mcp.run(transport="http", host="0.0.0.0", port=8000, path="/")
