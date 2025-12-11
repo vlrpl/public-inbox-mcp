@@ -40,7 +40,14 @@ def load_prompt_template(filename: str) -> Template:
 # Create an MCP server instance
 mcp = FastMCP("Notmuch Server")
 
-def is_patch_message(message: notmuch2.Message, toplevel_message_id: str) -> bool:
+def get_header(message: notmuch2.Message, header_name: str) -> str:
+    """Safely get a header from a notmuch message, returning empty string if not found."""
+    try:
+        return message.header(header_name) or ''
+    except LookupError:
+        return ''
+
+def is_patch(message: notmuch2.Message, toplevel_message_id: str) -> bool:
     """
     Check if a message is a patch based on:
     1. Its In-Reply-To header equals the toplevel message ID
@@ -55,17 +62,14 @@ def is_patch_message(message: notmuch2.Message, toplevel_message_id: str) -> boo
     """
     try:
         # Check if In-Reply-To matches the toplevel message ID
-        in_reply_to = message.header('in-reply-to') or ''
-        in_reply_to = in_reply_to.strip()
-
-        # Remove angle brackets unconditionally
-        in_reply_to = in_reply_to.strip('<>')
+        in_reply_to = get_header(message, 'in-reply-to')
+        in_reply_to = in_reply_to.strip().strip('<>')
 
         if in_reply_to != toplevel_message_id:
             return False
 
         # Check if subject contains PATCH tag
-        subject = message.header('subject') or ''
+        subject = get_header(message, 'subject')
 
         # Check if it's a reply (starts with Re:, R:, etc.)
         is_reply = bool(re.match(r'^\s*(re?|aw|fwd?):', subject, re.IGNORECASE))
@@ -103,11 +107,12 @@ def walk_replies(message, filter_func=None):
 
     return messages
 
-def retrieve_thread(thread_id: str, all_messages=True) -> list[notmuch2.Message]:
+def retrieve_thread(db: notmuch2.Database, thread_id: str, all_messages=True) -> list[notmuch2.Message]:
     """
     Retrieve messages in a thread given its thread ID.
 
     Args:
+        db (notmuch2.Database): The open notmuch database
         thread_id (str): The thread ID to retrieve messages from
         all_messages (bool): If True, returns all messages. If False, returns only
                            cover letter and patches.
@@ -118,33 +123,31 @@ def retrieve_thread(thread_id: str, all_messages=True) -> list[notmuch2.Message]
     messages = []
 
     try:
-        # Open the notmuch database
-        with notmuch2.Database(mode=notmuch2.Database.MODE.READ_ONLY) as db:
-            # Search for the specific thread
-            threads = db.threads(f"thread:{thread_id}")
+        # Search for the specific thread
+        threads = db.threads(f"thread:{thread_id}")
 
-            # Get the first (and should be only) thread
-            thread = next(iter(threads), None)
+        # Get the first (and should be only) thread
+        thread = next(iter(threads), None)
 
-            if thread:
-                # Get toplevel messages in the thread
-                for toplevel_message in thread.toplevel():
-                    # Always include the toplevel/cover letter message
-                    messages.append(toplevel_message)
+        if thread:
+            # Get toplevel messages in the thread
+            for toplevel_message in thread.toplevel():
+                # Always include the toplevel/cover letter message
+                messages.append(toplevel_message)
 
-                    # Define filter function based on all_messages parameter
-                    if all_messages:
-                        filter_func = None  # Include all replies
-                    else:
-                        # Create a filter function that identifies patches
-                        def patch_filter(reply_message, original_message):
-                            return is_patch_message(reply_message, toplevel_message.messageid)
-                        filter_func = patch_filter
+                # Define filter function based on all_messages parameter
+                if all_messages:
+                    filter_func = None  # Include all replies
+                else:
+                    # Create a filter function that identifies patches
+                    def patch_filter(reply_message, original_message):
+                        return is_patch(reply_message, toplevel_message.messageid)
+                    filter_func = patch_filter
 
-                    # Get replies using the appropriate filter
-                    messages.extend(walk_replies(toplevel_message, filter_func))
-            else:
-                print(f"Thread with ID {thread_id} not found")
+                # Get replies using the appropriate filter
+                messages.extend(walk_replies(toplevel_message, filter_func))
+        else:
+            print(f"Thread with ID {thread_id} not found")
 
     except Exception as e:
         print(f"Error: {e}")
@@ -188,15 +191,18 @@ def get_message_info(message: notmuch2.Message) -> str:
     result = []
     result.append(f"Message ID: {message.messageid}")
 
+    # Get headers directly from notmuch message, handle missing headers gracefully
+    result.append(f"In-Reply-To: {get_header(message, 'in-reply-to').strip().strip('<>')}")
+    result.append(f"From: {get_header(message, 'from')}")
+    result.append(f"To: {get_header(message, 'to')}")
+    result.append(f"Cc: {get_header(message, 'cc')}")
+    result.append(f"Subject: {get_header(message, 'subject')}")
+    result.append(f"Date: {get_header(message, 'date')}")
+    result.append(f"Tags: {', '.join(message.tags)}")
+
+    # Get body from file
     with message.path.open() as f:
         email_msg = message_from_file(f)
-
-    result.append(f"In-Reply-To: {email_msg.get('In-Reply-To')}")
-    result.append(f"From: {email_msg.get('From')}")
-    result.append(f"To: {message.header('to')}")
-    result.append(f"Subject: {email_msg.get('Subject')}")
-    result.append(f"Date: {message.header('date')}")
-    result.append(f"Tags: {', '.join(message.tags)}")
 
     body = get_email_body(email_msg)
     result.append("Body:")
@@ -219,9 +225,15 @@ def do_show_thread(tid: str, all_messages=True) -> str:
     """
     result = []
 
-    messages = retrieve_thread(tid, all_messages)
-    for msg in messages:
-        result.append(get_message_info(msg))
+    try:
+        # Open the notmuch database and keep it open while processing
+        with notmuch2.Database(mode=notmuch2.Database.MODE.READ_ONLY) as db:
+            messages = retrieve_thread(db, tid, all_messages)
+            for msg in messages:
+                result.append(get_message_info(msg))
+    except Exception as e:
+        print(f"Error: {e}")
+        return f"Error: {e}"
 
     return '\n'.join(result)
 
