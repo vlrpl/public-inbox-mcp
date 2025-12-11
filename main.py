@@ -1,6 +1,7 @@
 # main.py
 from fastmcp import FastMCP
 import notmuch2
+import re
 from email import message_from_file
 from string import Template
 from pathlib import Path
@@ -39,17 +40,77 @@ def load_prompt_template(filename: str) -> Template:
 # Create an MCP server instance
 mcp = FastMCP("Notmuch Server")
 
-def walk_replies(messages, message):
-    for reply in message.replies():
-        messages.append(reply)
-        walk_replies(messages, reply)
-
-def retrieve_thread(thread_id: str) -> list[notmuch2.Message]:
+def is_patch_message(message: notmuch2.Message, toplevel_message_id: str) -> bool:
     """
-    Retrieve all messages in a thread given its thread ID.
+    Check if a message is a patch based on:
+    1. Its In-Reply-To header equals the toplevel message ID
+    2. Its subject contains a PATCH tag (e.g., [PATCH], [RFC PATCH v2], etc.)
+
+    Args:
+        message: The notmuch message to check
+        toplevel_message_id: The Message-ID of the toplevel/cover letter message
+
+    Returns:
+        bool: True if the message is a patch, False otherwise
+    """
+    try:
+        # Check if In-Reply-To matches the toplevel message ID
+        in_reply_to = message.header('in-reply-to') or ''
+        in_reply_to = in_reply_to.strip()
+
+        # Remove angle brackets unconditionally
+        in_reply_to = in_reply_to.strip('<>')
+
+        if in_reply_to != toplevel_message_id:
+            return False
+
+        # Check if subject contains PATCH tag
+        subject = message.header('subject') or ''
+
+        # Check if it's a reply (starts with Re:, R:, etc.)
+        is_reply = bool(re.match(r'^\s*(re?|aw|fwd?):', subject, re.IGNORECASE))
+        if is_reply:
+            return False
+
+        # Look for PATCH within square brackets at the start, case insensitive
+        patch_pattern = r'^\s*\[.*?PATCH.*?\]'
+        is_patch = bool(re.search(patch_pattern, subject, re.IGNORECASE))
+        return is_patch
+
+    except Exception:
+        return False
+
+def walk_replies(message, filter_func=None):
+    """
+    Walk through message replies, optionally filtering them.
+
+    Args:
+        message: The message whose replies to walk
+        filter_func: Optional filter function that takes (reply_message, original_message)
+                    and returns True if the reply should be included
+
+    Returns:
+        list: List of filtered reply messages
+    """
+    messages = []
+    for reply in message.replies():
+        # If no filter function is provided, include all messages (original behavior)
+        if filter_func is None or filter_func(reply, message):
+            messages.append(reply)
+
+        # Recursively walk replies regardless of whether current message was included
+        messages.extend(walk_replies(reply, filter_func))
+
+    return messages
+
+def retrieve_thread(thread_id: str, all_messages=True) -> list[notmuch2.Message]:
+    """
+    Retrieve messages in a thread given its thread ID.
 
     Args:
         thread_id (str): The thread ID to retrieve messages from
+        all_messages (bool): If True, returns all messages. If False, returns only
+                           cover letter and patches.
 
     Returns:
         list[notmuch2.Message]: A list of Message objects in the thread
@@ -66,10 +127,22 @@ def retrieve_thread(thread_id: str) -> list[notmuch2.Message]:
             thread = next(iter(threads), None)
 
             if thread:
-                # Get all messages in the thread
-                for message in thread.toplevel():
-                    messages.append(message)
-                    walk_replies(messages, message)
+                # Get toplevel messages in the thread
+                for toplevel_message in thread.toplevel():
+                    # Always include the toplevel/cover letter message
+                    messages.append(toplevel_message)
+
+                    # Define filter function based on all_messages parameter
+                    if all_messages:
+                        filter_func = None  # Include all replies
+                    else:
+                        # Create a filter function that identifies patches
+                        def patch_filter(reply_message, original_message):
+                            return is_patch_message(reply_message, toplevel_message.messageid)
+                        filter_func = patch_filter
+
+                    # Get replies using the appropriate filter
+                    messages.extend(walk_replies(toplevel_message, filter_func))
             else:
                 print(f"Thread with ID {thread_id} not found")
 
@@ -132,10 +205,21 @@ def get_message_info(message: notmuch2.Message) -> str:
 
     return '\n'.join(result)
 
-def do_show_thread(tid: str) -> str:
+def do_show_thread(tid: str, all_messages=True) -> str:
+    """
+    Show thread messages with optional filtering.
+
+    Args:
+        tid (str): Thread ID to show
+        all_messages (bool): If True, shows all messages. If False, shows only
+                           cover letter and patches.
+
+    Returns:
+        str: Formatted thread content
+    """
     result = []
 
-    messages = retrieve_thread(tid)
+    messages = retrieve_thread(tid, all_messages)
     for msg in messages:
         result.append(get_message_info(msg))
 
@@ -154,6 +238,25 @@ def show_thread(thread_id: str) -> str:
         or an error message.
     """
     return do_show_thread(thread_id)
+
+@mcp.tool()
+def show_series(thread_id: str) -> str:
+    """
+    Displays only the cover letter and patch messages from a thread,
+    filtering out replies and other non-patch messages.
+
+    This tool returns only:
+    - The cover letter (toplevel message)
+    - Patch messages (replies to the cover letter with PATCH tag in subject)
+
+    Args:
+        thread_id: The ID of the thread to display (without the prefix "thread:").
+
+    Returns:
+        A formatted string containing only the cover letter and patch messages
+        from the thread, or an error message.
+    """
+    return do_show_thread(thread_id, all_messages=False)
 
 def do_find_threads(notmuch_filter: str) -> list[tuple[str, str]]:
     """
@@ -246,6 +349,18 @@ def next_revision(notmuch_filter: str) -> str:
     except (FileNotFoundError, PermissionError, IOError) as e:
         return f"Error loading prompt template: {e}"
 
+@mcp.prompt
+def review_series(notmuch_filter: str, review_prompts_path: str) -> str:
+    """Review a series of patches from a mailing list using notmuch tools and custom analysis prompts"""
+    try:
+        template = load_prompt_template("reviews.md")
+        return template.safe_substitute(
+            notmuch_filter=notmuch_filter,
+            review_prompts_path=review_prompts_path
+        )
+    except (FileNotFoundError, PermissionError, IOError) as e:
+        return f"Error loading prompt template: {e}"
+
 if __name__ == "__main__":
     import sys
 
@@ -260,6 +375,6 @@ if __name__ == "__main__":
         mcp.run()
     if len(sys.argv) == 2:
         threads = do_find_threads(sys.argv[1])
-        do_show_thread(threads[0][0])
+        do_show_thread(threads[0][0], False)
     else:
         mcp.run(transport="http", host="0.0.0.0", port=8000, path="/")
