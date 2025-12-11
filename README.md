@@ -1,6 +1,7 @@
 # EXPERIMENTAL MCP TARGETED FOR PUBLIC INBOX
 
 A drafted small mcp used to summarize patch series and monitor the status.
+Code and prompts are mostly vibe-coded.
 
 ## NOTMUCH CONFIGURATION
 

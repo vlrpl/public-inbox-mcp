@@ -364,13 +364,6 @@ def review_series(notmuch_filter: str, review_prompts_path: str) -> str:
 if __name__ == "__main__":
     import sys
 
-    # To run this server:
-    # 1. Make sure you have notmuch installed and configured.
-    # 2. Install the required Python libraries:
-    #    pip install fastmcp python-notmuch2
-    # 3. Run the server from your terminal:
-    #    fastmcp run main.py
-
     if len(sys.argv) == 2 and sys.argv[1] == "stdio":
         mcp.run()
     if len(sys.argv) == 2:
