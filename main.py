@@ -1,22 +1,121 @@
 # main.py
 from fastmcp import FastMCP
 import notmuch2
+import re
 from email import message_from_file
+from string import Template
+from pathlib import Path
+
+# Prompt loading functionality
+PROMPTS_DIR = Path(__file__).parent / "prompts"
+
+def load_prompt_template(filename: str) -> Template:
+    """
+    Load a prompt template from the prompts directory with error handling.
+
+    Args:
+        filename: The name of the prompt file
+
+    Returns:
+        Template: A string Template object for the prompt
+
+    Raises:
+        FileNotFoundError: If the prompt file doesn't exist
+        PermissionError: If the file cannot be read due to permissions
+        IOError: If there's an error reading the file
+    """
+    prompt_file = PROMPTS_DIR / filename
+
+    if not prompt_file.exists():
+        raise FileNotFoundError(f"Prompt file not found: {prompt_file}")
+
+    try:
+        content = prompt_file.read_text(encoding='utf-8')
+        return Template(content)
+    except PermissionError:
+        raise PermissionError(f"Permission denied reading prompt file: {prompt_file}")
+    except Exception as e:
+        raise IOError(f"Error reading prompt file {prompt_file}: {e}")
 
 # Create an MCP server instance
 mcp = FastMCP("Notmuch Server")
 
-def walk_replies(messages, message):
-    for reply in message.replies():
-        messages.append(reply)
-        walk_replies(messages, reply)
+def get_header(message: notmuch2.Message, header_name: str) -> str:
+    """Safely get a header from a notmuch message, returning empty string if not found."""
+    try:
+        return message.header(header_name) or ''
+    except LookupError:
+        return ''
 
-def retrieve_thread(thread_id: str) -> list[notmuch2.Message]:
+def is_patch(message: notmuch2.Message, toplevel_message_id: str) -> bool:
     """
-    Retrieve all messages in a thread given its thread ID.
+    Check if a message is a patch based on:
+    1. Its In-Reply-To header equals the toplevel message ID
+    2. Its subject contains a PATCH tag (e.g., [PATCH], [RFC PATCH v2], etc.)
 
     Args:
+        message: The notmuch message to check
+        toplevel_message_id: The Message-ID of the toplevel/cover letter message
+
+    Returns:
+        bool: True if the message is a patch, False otherwise
+    """
+    try:
+        # Check if In-Reply-To matches the toplevel message ID
+        in_reply_to = get_header(message, 'in-reply-to')
+        in_reply_to = in_reply_to.strip().strip('<>')
+
+        if in_reply_to != toplevel_message_id:
+            return False
+
+        # Check if subject contains PATCH tag
+        subject = get_header(message, 'subject')
+
+        # Check if it's a reply (starts with Re:, R:, etc.)
+        is_reply = bool(re.match(r'^\s*(re?|aw|fwd?):', subject, re.IGNORECASE))
+        if is_reply:
+            return False
+
+        # Look for PATCH within square brackets at the start, case insensitive
+        patch_pattern = r'^\s*\[.*?PATCH.*?\]'
+        is_patch = bool(re.search(patch_pattern, subject, re.IGNORECASE))
+        return is_patch
+
+    except Exception:
+        return False
+
+def walk_replies(message, filter_func=None):
+    """
+    Walk through message replies, optionally filtering them.
+
+    Args:
+        message: The message whose replies to walk
+        filter_func: Optional filter function that takes (reply_message, original_message)
+                    and returns True if the reply should be included
+
+    Returns:
+        list: List of filtered reply messages
+    """
+    messages = []
+    for reply in message.replies():
+        # If no filter function is provided, include all messages (original behavior)
+        if filter_func is None or filter_func(reply, message):
+            messages.append(reply)
+
+        # Recursively walk replies regardless of whether current message was included
+        messages.extend(walk_replies(reply, filter_func))
+
+    return messages
+
+def retrieve_thread(db: notmuch2.Database, thread_id: str, all_messages=True) -> list[notmuch2.Message]:
+    """
+    Retrieve messages in a thread given its thread ID.
+
+    Args:
+        db (notmuch2.Database): The open notmuch database
         thread_id (str): The thread ID to retrieve messages from
+        all_messages (bool): If True, returns all messages. If False, returns only
+                           cover letter and patches.
 
     Returns:
         list[notmuch2.Message]: A list of Message objects in the thread
@@ -24,21 +123,31 @@ def retrieve_thread(thread_id: str) -> list[notmuch2.Message]:
     messages = []
 
     try:
-        # Open the notmuch database
-        with notmuch2.Database(mode=notmuch2.Database.MODE.READ_ONLY) as db:
-            # Search for the specific thread
-            threads = db.threads(f"thread:{thread_id}")
+        # Search for the specific thread
+        threads = db.threads(f"thread:{thread_id}")
 
-            # Get the first (and should be only) thread
-            thread = next(iter(threads), None)
+        # Get the first (and should be only) thread
+        thread = next(iter(threads), None)
 
-            if thread:
-                # Get all messages in the thread
-                for message in thread.toplevel():
-                    messages.append(message)
-                    walk_replies(messages, message)
-            else:
-                print(f"Thread with ID {thread_id} not found")
+        if thread:
+            # Get toplevel messages in the thread
+            for toplevel_message in thread.toplevel():
+                # Always include the toplevel/cover letter message
+                messages.append(toplevel_message)
+
+                # Define filter function based on all_messages parameter
+                if all_messages:
+                    filter_func = None  # Include all replies
+                else:
+                    # Create a filter function that identifies patches
+                    def patch_filter(reply_message, original_message):
+                        return is_patch(reply_message, toplevel_message.messageid)
+                    filter_func = patch_filter
+
+                # Get replies using the appropriate filter
+                messages.extend(walk_replies(toplevel_message, filter_func))
+        else:
+            print(f"Thread with ID {thread_id} not found")
 
     except Exception as e:
         print(f"Error: {e}")
@@ -82,20 +191,49 @@ def get_message_info(message: notmuch2.Message) -> str:
     result = []
     result.append(f"Message ID: {message.messageid}")
 
+    # Get headers directly from notmuch message, handle missing headers gracefully
+    result.append(f"In-Reply-To: {get_header(message, 'in-reply-to').strip().strip('<>')}")
+    result.append(f"From: {get_header(message, 'from')}")
+    result.append(f"To: {get_header(message, 'to')}")
+    result.append(f"Cc: {get_header(message, 'cc')}")
+    result.append(f"Subject: {get_header(message, 'subject')}")
+    result.append(f"Date: {get_header(message, 'date')}")
+    result.append(f"Tags: {', '.join(message.tags)}")
+
+    # Get body from file
     with message.path.open() as f:
         email_msg = message_from_file(f)
-
-    result.append(f"From: {email_msg.get('From')}")
-    result.append(f"To: {message.header('to')}")
-    result.append(f"Subject: {email_msg.get('Subject')}")
-    result.append(f"Date: {message.header('date')}")
-    result.append(f"Message-id: {message.messageid}")
-    result.append(f"Tags: {', '.join(message.tags)}")
 
     body = get_email_body(email_msg)
     result.append("Body:")
     result.append(body)
     result.append("-" * 50)
+
+    return '\n'.join(result)
+
+def do_show_thread(tid: str, all_messages=True) -> str:
+    """
+    Show thread messages with optional filtering.
+
+    Args:
+        tid (str): Thread ID to show
+        all_messages (bool): If True, shows all messages. If False, shows only
+                           cover letter and patches.
+
+    Returns:
+        str: Formatted thread content
+    """
+    result = []
+
+    try:
+        # Open the notmuch database and keep it open while processing
+        with notmuch2.Database(mode=notmuch2.Database.MODE.READ_ONLY) as db:
+            messages = retrieve_thread(db, tid, all_messages)
+            for msg in messages:
+                result.append(get_message_info(msg))
+    except Exception as e:
+        print(f"Error: {e}")
+        return f"Error: {e}"
 
     return '\n'.join(result)
 
@@ -111,13 +249,26 @@ def show_thread(thread_id: str) -> str:
         A formatted string containing the messages in the thread,
         or an error message.
     """
-    result = []
+    return do_show_thread(thread_id)
 
-    messages = retrieve_thread(thread_id)
-    for msg in messages:
-        result.append(get_message_info(msg))
+@mcp.tool()
+def show_series(thread_id: str) -> str:
+    """
+    Displays only the cover letter and patch messages from a thread,
+    filtering out replies and other non-patch messages.
 
-    return '\n'.join(result)
+    This tool returns only:
+    - The cover letter (toplevel message)
+    - Patch messages (replies to the cover letter with PATCH tag in subject)
+
+    Args:
+        thread_id: The ID of the thread to display (without the prefix "thread:").
+
+    Returns:
+        A formatted string containing only the cover letter and patch messages
+        from the thread, or an error message.
+    """
+    return do_show_thread(thread_id, all_messages=False)
 
 def do_find_threads(notmuch_filter: str) -> list[tuple[str, str]]:
     """
@@ -173,7 +324,6 @@ def do_find_threads(notmuch_filter: str) -> list[tuple[str, str]]:
     except Exception as e:
         raise RuntimeError(f"Unexpected error while searching threads: {e}")
 
-    # print(series_threads)
     return series_threads
 
 @mcp.tool()
@@ -196,31 +346,40 @@ def find_threads(notmuch_filter: str) -> list[tuple[str, str]]:
 @mcp.prompt
 def my_status(notmuch_filter: str) -> str:
     """Show the status of the patches pushed on a mailing list"""
-    content = """The goal is to find if and what patches have been merged in a specific series. To achieve this, follow these steps:
-Find the thread: Use the find_threads tool with a notmuch filter to locate the thread for your patch series.
-        Use: '{notmuch_filter}' to find the thread
-    Inspect the thread status: Once you have the thread_id from the find_threads tool, use the show_thread() tool to retrieve detailed information about the thread, including all messages and their content.
-    Verify merge status: In the thread content, look for an email from patchwork-bot+netdevbpf that replies to the topmost email. This bot's emails contain information about the actions performed on the patch series. A merged or applied status will be explicitly mentioned in this reply.
-    Output: From the patchwork-bot+netdevbpf email, extract the following information:
-        Merged Patches: The title and author of each patch that has been merged.
-        Merged Status: The status of the merge (e.g., \"Merged,\" \"Applied\").
-        Merged By: The name of the person or system that performed the merge, if specified in the email."""
+    try:
+        template = load_prompt_template("my_status.md")
+        return template.safe_substitute(notmuch_filter=notmuch_filter)
+    except (FileNotFoundError, PermissionError, IOError) as e:
+        return f"Error loading prompt template: {e}"
 
-    return content
+@mcp.prompt
+def next_revision(notmuch_filter: str) -> str:
+    """Creates the git notes for the next respin of the series"""
+    try:
+        template = load_prompt_template("next_revision.md")
+        return template.safe_substitute(notmuch_filter=notmuch_filter)
+    except (FileNotFoundError, PermissionError, IOError) as e:
+        return f"Error loading prompt template: {e}"
+
+@mcp.prompt
+def review_series(notmuch_filter: str, review_prompts_path: str) -> str:
+    """Review a series of patches from a mailing list using notmuch tools and custom analysis prompts"""
+    try:
+        template = load_prompt_template("reviews.md")
+        return template.safe_substitute(
+            notmuch_filter=notmuch_filter,
+            review_prompts_path=review_prompts_path
+        )
+    except (FileNotFoundError, PermissionError, IOError) as e:
+        return f"Error loading prompt template: {e}"
 
 if __name__ == "__main__":
     import sys
 
-    # To run this server:
-    # 1. Make sure you have notmuch installed and configured.
-    # 2. Install the required Python libraries:
-    #    pip install fastmcp python-notmuch2
-    # 3. Run the server from your terminal:
-    #    fastmcp run main.py
-
     if len(sys.argv) == 2 and sys.argv[1] == "stdio":
         mcp.run()
     if len(sys.argv) == 2:
-        do_find_threads(sys.argv[1])
+        threads = do_find_threads(sys.argv[1])
+        do_show_thread(threads[0][0], False)
     else:
         mcp.run(transport="http", host="0.0.0.0", port=8000, path="/")
