@@ -373,6 +373,18 @@ def review_series(notmuch_filter: str, review_prompts_path: str) -> str:
     except (FileNotFoundError, PermissionError, IOError) as e:
         return f"Error loading prompt template: {e}"
 
+@mcp.prompt
+def devlog(gitobject: str, gitobject_next: str) -> str:
+    """Generate a technical development changelog by analyzing the differences between two git objects using git range-diff"""
+    try:
+        template = load_prompt_template("changelog.md")
+        return template.safe_substitute(
+            gitobject=gitobject,
+            gitobject_next=gitobject_next
+        )
+    except (FileNotFoundError, PermissionError, IOError) as e:
+        return f"Error loading prompt template: {e}"
+
 if __name__ == "__main__":
     import sys
 
